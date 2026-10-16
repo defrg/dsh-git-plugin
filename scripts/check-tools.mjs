@@ -27,9 +27,13 @@ function assert(condition, label, detail) {
   }
 }
 
-// ---------------------------------------------------------------- 假 ctx：捕获工具注册
+// ------------------------------------------- 假 ctx：捕获工具注册、配置路由与配置写入
 
 const registered = new Map();
+const routes = [];
+const writes = [];
+/** 模拟 ctx.connection.requestRejection() 的返回：401 / 403 / undefined。 */
+let rejection = undefined;
 
 const ctx = {
   on() {
@@ -42,8 +46,20 @@ const ctx = {
     },
   },
   settings: {
-    async update() {
-      return {};
+    async update(entryId, patch) {
+      writes.push({ entryId, patch });
+      return { layer: 'profile', entryId };
+    },
+  },
+  webServer: {
+    register(route) {
+      routes.push(route);
+      return () => {};
+    },
+  },
+  connection: {
+    requestRejection() {
+      return rejection;
     },
   },
 };
@@ -74,7 +90,7 @@ console.log('[1] 工具注册面');
 const expected = [
   'git_version', 'git_status', 'git_log', 'git_diff', 'git_show', 'git_blame',
   'git_branch', 'git_add', 'git_commit', 'git_restore', 'git_stash',
-  'git_remote', 'git_sync', 'git_run', 'git_repo',
+  'git_remote', 'git_sync', 'git_run', 'git_repo', 'git_config',
 ];
 for (const toolName of expected) {
   const definition = registered.get(toolName);
@@ -252,6 +268,119 @@ assert(badRun.ok === false && badRun.code === 'BAD_ARGS', 'git_run 空参数被�
 const failedRun = await tool('git_run', { args: ['rev-parse', '--verify', 'no-such-ref'] });
 assert(failedRun.ok === false && failedRun.code !== 0, 'git_run 对非零退出码如实返回（不抛异常）', `code=${failedRun.code}`);
 assert(typeof failedRun.text === 'string' && failedRun.text.includes('退出码'), '输出里带退出码');
+
+// ---------------------------------------------------------------- 13. 配置入口
+
+console.log('\n[13] 配置入口（设置卡片的路由 + git_config 工具）');
+
+const route = routes.find((r) => r.path === '/git-plugin/api');
+assert(Boolean(route) && typeof route.handler === 'function', '已注册 /git-plugin/api 配置路由');
+assert(route?.kind === 'prefix', '路由 kind = prefix');
+
+function makeReq({ method = 'GET', url = '/', headers = {}, body } = {}) {
+  const handlers = {};
+  const req = {
+    method,
+    url,
+    headers,
+    complete: body === undefined,
+    readableEnded: body === undefined,
+    on(event, callback) {
+      handlers[event] = callback;
+      if (event === 'data' && body !== undefined) queueMicrotask(() => callback(Buffer.from(body, 'utf8')));
+      if (event === 'end') queueMicrotask(() => handlers.end?.());
+      return req;
+    },
+  };
+  return req;
+}
+
+const makeRes = () => ({
+  statusCode: 200,
+  headers: {},
+  body: undefined,
+  setHeader(key, value) {
+    this.headers[String(key).toLowerCase()] = value;
+  },
+  end(body) {
+    this.body = body;
+  },
+});
+
+const CONFIG_URL = '/git-plugin/api/config';
+
+// 未鉴权必须被拒，且不能泄露配置
+rejection = 403;
+let res = makeRes();
+await route.handler(makeReq({ method: 'GET', url: CONFIG_URL }), res);
+assert(res.statusCode === 403, '未鉴权 GET 返回 403', String(res.statusCode));
+assert(!res.body || !String(res.body).includes('gitPath'), '未鉴权响应体不含配置内容');
+
+// 未鉴权 POST 必须被拒且不写入
+rejection = 401;
+const writesBefore = writes.length;
+res = makeRes();
+await route.handler(
+  makeReq({ method: 'POST', url: CONFIG_URL, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ gitPath: 'E:/evil.exe' }) }),
+  res,
+);
+assert(res.statusCode === 401, '未鉴权 POST 返回 401', String(res.statusCode));
+assert(writes.length === writesBefore, '未鉴权 POST 没有发生写入', `写入了 ${writes.length - writesBefore} 次`);
+
+// 鉴权通过：GET 返回生效值
+rejection = undefined;
+res = makeRes();
+await route.handler(makeReq({ method: 'GET', url: CONFIG_URL }), res);
+let parsed = null;
+try {
+  parsed = JSON.parse(String(res.body));
+} catch { /* 下面断言会报出来 */ }
+assert(res.statusCode === 200, '鉴权通过 GET 返回 200', String(res.statusCode));
+assert(parsed?.ok === true, '响应体是合法 JSON');
+assert(typeof parsed?.result?.effective?.gitPath === 'string', '生效值里带 git 可执行文件路径', parsed?.result?.effective?.gitPath);
+assert(parsed?.result?.effective?.gitSource, '生效值里带来源', parsed?.result?.effective?.gitSource);
+
+// 鉴权通过：POST 写入，且只接受白名单字段
+res = makeRes();
+await route.handler(
+  makeReq({
+    method: 'POST',
+    url: CONFIG_URL,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ gitDir: 'D:/fake/git', protectedBranches: 'main, release', timeoutMs: 1, 恶意字段: 'x' }),
+  }),
+  res,
+);
+assert(res.statusCode === 200, '鉴权通过 POST 返回 200', String(res.statusCode));
+const lastWrite = writes[writes.length - 1];
+assert(writes.length === writesBefore + 1, '发生了一次 settings.update');
+assert(lastWrite?.patch?.gitDir === 'D:/fake/git', '写入 gitDir', JSON.stringify(lastWrite?.patch));
+assert(Array.isArray(lastWrite?.patch?.protectedBranches) && lastWrite.patch.protectedBranches.join(',') === 'main,release', '逗号串被解析成数组', JSON.stringify(lastWrite?.patch?.protectedBranches));
+assert(!('timeoutMs' in (lastWrite?.patch ?? {})), '白名单外的 timeoutMs 未被写入');
+assert(!('恶意字段' in (lastWrite?.patch ?? {})), '未知字段未被写入');
+
+// 空 patch 要被拒
+res = makeRes();
+await route.handler(makeReq({ method: 'POST', url: CONFIG_URL, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ timeoutMs: 5 }) }), res);
+assert(res.statusCode === 400, '没有任何可写字段时返回 400', String(res.statusCode));
+
+// git_config 工具
+const cfgGet = await tool('git_config', { action: 'get' });
+assert(cfgGet.ok === true, 'git_config get 成功');
+assert(typeof cfgGet.effective?.gitPath === 'string' && cfgGet.effective.gitPath.length > 0, 'get 返回生效的 git 路径', cfgGet.effective?.gitPath);
+assert(cfgGet.text.includes('来源'), 'get 的文本里有来源标注');
+
+const writesBeforeTool = writes.length;
+const cfgSet = await tool('git_config', { action: 'set', gitDir: 'D:/tool/git' });
+assert(cfgSet.ok === true, 'git_config set 成功', cfgSet.text?.slice(0, 80));
+assert(writes.length === writesBeforeTool + 1, 'set 触发了一次 settings.update');
+assert(writes[writes.length - 1]?.patch?.gitDir === 'D:/tool/git', '写入内容正确');
+assert(typeof cfgSet.writtenTo === 'string', '返回写入位置', cfgSet.writtenTo);
+
+const cfgBad = await tool('git_config', { action: 'set' });
+assert(cfgBad.ok === false && cfgBad.code === 'BAD_ARGS', 'set 不带字段时报 BAD_ARGS');
+const cfgBadAction = await tool('git_config', { action: 'nonsense' });
+assert(cfgBadAction.ok === false && cfgBadAction.code === 'BAD_ARGS', '未知 action 报 BAD_ARGS');
 
 // ---------------------------------------------------------------- 清理 & 汇总
 

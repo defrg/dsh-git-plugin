@@ -42,6 +42,7 @@ DSH（DeepSeek Harness）插件：把 **git 常用操作**接成工具，让 Age
 | `git_remote` | list / add / remove / set-url |
 | `git_sync` | fetch / pull / push，强制推送需显式 `force: true` |
 | `git_run` | 逃生口：执行任意 git 子命令（`init`、`clone`、`reset`、`revert`、`tag`、`cherry-pick`…） |
+| `git_config` | 读 / 写本插件配置（`get` / `set`），改动即时生效、无需重启 |
 
 `git_run` 的 `args` 是**参数数组**、不含开头的 `git`：
 
@@ -53,7 +54,11 @@ DSH（DeepSeek Harness）插件：把 **git 常用操作**接成工具，让 Age
 
 ## 配置
 
-在「设置 → 插件 → dsh-git-plugin」里改（写入本 profile 覆盖层），也可以写在 `cordis.patch.yml`：
+有**两个入口**，改的是同一份配置（都写进本 profile 覆盖层、volatile 值即时生效、无需重启）：
+
+1. **图形界面**：「设置 → 插件 → dsh-git-plugin」里的配置卡片。插件自带 `lib/client.js`
+   注册进 `plugins.bundle.config` 槽位 —— DSH 不会为第三方 bundle 自动生成表单，必须自带这张卡。
+2. **工具 / YAML**：让 Agent 调 `git_config`，或直接写在 `cordis.patch.yml`：
 
 ```yaml
 - id: dsh-git-plugin
@@ -93,17 +98,25 @@ DSH（DeepSeek Harness）插件：把 **git 常用操作**接成工具，让 Age
 - **`git_restore` 必须显式给路径**：不给 `paths` 直接报 `BAD_ARGS`，杜绝"手滑清空整个工作区"。
 - **只读工具才并发**：`git_version` / `git_status` / `git_log` / `git_diff` / `git_show` / `git_blame`
   声明为可并发，其余串行，避免 `index.lock` 争抢与工作区互相打架。
+- **配置路由带鉴权**：`/git-plugin/api/config` 是设置卡片用的读写入口。`webServer` 载体自身
+  **不拥有认证与 Origin 策略**，所以这里套了 `ctx.connection.requestRejection(req)` ——
+  否则任何能访问该端口的页面都能盲发 POST 改写 `gitDir` / `gitPath`，下一次调用就会用
+  攻击者指定的可执行文件去跑"git"。配置写入还被收窄成字段白名单（`gitDir` / `gitPath` /
+  `defaultRepo` / `protectedBranches`），`timeoutMs` 之类的字段改不动。
 
 ## 自测
 
 ```powershell
 node scripts/check-git-path.mjs   # 可执行文件定位：19 项断言（含"配错要留痕"）
-node scripts/check-tools.mjs      # 真实仓库上跑完整流程：75 项断言
+node scripts/check-tools.mjs      # 真实仓库上跑完整流程 + 配置入口：102 项断言
 ```
 
-`check-tools.mjs` 会在临时目录里 `git init` 一个真仓库，把 15 个工具实跑一遍
+`check-tools.mjs` 会在临时目录里 `git init` 一个真仓库，把 16 个工具实跑一遍
 （建仓 → 配置身份 → 改文件 → status → add → commit → log → diff → branch → stash → restore
-→ remote → 受保护分支拦截 → 参数校验），跑完即删。
+→ remote → 受保护分支拦截 → 配置读写 → 参数校验），跑完即删。
+
+配置入口那部分用假 ctx 捕获路由，验证三件事：**未鉴权的 GET 拿不到配置、未鉴权的 POST
+写不进配置、鉴权通过后只有白名单字段能落盘**。
 
 临时目录默认用系统临时目录，可用 `DSH_GIT_PLUGIN_CHECK_DIR` 改写。
 
