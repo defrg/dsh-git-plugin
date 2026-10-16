@@ -1,0 +1,22 @@
+# dsh-git-plugin bundle 层：插入 git 工具行。
+#
+# 这里**刻意不带任何本机路径**：不写 config 时插件会自己解析 git 在哪
+# （见 lib/git.js 的 resolveGitPath）——显式配置 → GIT_PATH 环境变量 →
+# 各平台标准安装位置 → PATH 兜底。所以同一份 patch 在任何机器上都能用。
+#
+# config 字段（都可在「设置 → 插件 → dsh-git-plugin」里改，写入本 profile 覆盖层）：
+#   gitDir             Git 安装根目录，如 Windows 的 C:\Program Files\Git、macOS 的 /usr/local
+#                      会被拼成 <gitDir>/cmd/git.exe、<gitDir>/bin/git 等候选
+#   gitPath            git 可执行文件完整路径；填了优先于 gitDir
+#   defaultRepo        默认仓库目录；工具调用没传 repo 时用它，再留空则用进程 cwd
+#   timeoutMs          单条 git 命令超时（默认 30000）
+#   maxTextChars       返回文本截断上限（默认 12000）
+#   protectedBranches  受保护分支，拒绝对它们强制推送（默认 [main, master]）
+#
+# 要在本机固定下来，就在下面加 config，例如：
+#   config:
+#     gitDir: 'C:\Program Files\Git'
+#     defaultRepo: 'E:/project/my-repo'
+- insert:
+    - id: dsh-git-plugin
+      name: 'dsh-git-plugin'
