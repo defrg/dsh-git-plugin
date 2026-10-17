@@ -15,9 +15,10 @@
   "type": "module",
   "main": "./lib/index.js",
   "scripts": {
-    "check": "node scripts/check-git-path.mjs && node scripts/check-tools.mjs",
+    "check": "node scripts/check-git-path.mjs && node scripts/check-tools.mjs && node scripts/check-risk-ratchet.mjs",
     "check:git-path": "node scripts/check-git-path.mjs",
-    "check:tools": "node scripts/check-tools.mjs"
+    "check:tools": "node scripts/check-tools.mjs",
+    "check:risk": "node scripts/check-risk-ratchet.mjs"
   },
   "exports": {
     ".": "./lib/index.js",

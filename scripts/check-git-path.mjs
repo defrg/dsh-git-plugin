@@ -17,8 +17,15 @@ import { join } from 'node:path';
 import { GIT_EXE, DEFAULTS, resolveConfig, resolveGitPath, resolveRepo } from '../lib/git.js';
 
 let failed = 0;
+/**
+ * 「空跑判据」：数断言到底被调用了多少次。
+ * 一条都没跑 = 脚本被清空 / 被提前 return / 循环体没进 —— 那种「绿」比红更危险，
+ * 因为它看起来通过了，实际什么都没验。收尾处把它判为**失败**。
+ */
+let assertions = 0;
 
 function assert(condition, label, detail) {
+  assertions += 1;
   if (condition) console.log(`  ✓ ${label}`);
   else {
     failed += 1;
@@ -121,4 +128,9 @@ if (failed > 0) {
   console.error(`✗ ${failed} 项断言失败 —— git 定位逻辑有问题`);
   process.exit(1);
 }
-console.log('✓ git 定位逻辑正常：显式配置优先、配错留痕、缺省可跨平台回退');
+// 空跑即失败：断言数为 0 时绝不能报「通过」
+if (assertions === 0) {
+  console.error('✗ 空跑：一条断言都没执行 —— 判为失败（不是通过）');
+  process.exit(1);
+}
+console.log(`✓ git 定位逻辑正常：显式配置优先、配错留痕、缺省可跨平台回退（${assertions} 项断言）`);
